@@ -66,6 +66,10 @@ function InnerKinks(hook) {
     CNC_CHARACTERS: ""
     // (comma-separated names)
     ,
+    // --- Safe Words ---
+    // Prompt players to establish safe words before first intimate escalation:
+    SAFE_WORDS_ENABLED: true
+    ,
     // --- Debug ---
     // Write live NPC state to kink card notes each turn:
     DEBUG_MODE: false
@@ -89,11 +93,13 @@ function InnerKinks(hook) {
     // Initialize persistent state
     state.InnerKinks ??= {};
     const IK = state.InnerKinks;
-    IK.cooldown ??= 0;
-    IK.index    ??= 0;
-    IK.pending  ??= null;
-    IK.driftTag ??= null;
-    IK.chars    ??= {};
+    IK.cooldown         ??= 0;
+    IK.index            ??= 0;
+    IK.pending          ??= null;
+    IK.driftTag         ??= null;
+    IK.chars            ??= {};
+    IK.safeWordTimer    ??= 0;    // turns remaining of scene-stopped override
+    IK.awaitingSafeWord ??= null; // character name pending safe word negotiation
 
     // Declare config constants here so they are initialized before initConfigCard/applyConfigCard call them
     const CONFIG_TITLE = "Configure Inner Kinks";
@@ -111,6 +117,8 @@ function InnerKinks(hook) {
         "compat_penalty_amount: 0.1",
         "drift_sensitivity: 3",
         "intensity_decay: 5",
+        "cnc_characters: ",
+        "safe_words: true",
         "debug_mode: false",
     ].join("\n");
     const CONFIG_KEY_MAP = {
@@ -126,6 +134,8 @@ function InnerKinks(hook) {
         compat_penalty_amount: ["COMPAT_PENALTY_AMOUNT",  "float"],
         drift_sensitivity:     ["DRIFT_SENSITIVITY",      "integer"],
         intensity_decay:       ["INTENSITY_DECAY",        "integer"],
+        cnc_characters:        ["CNC_CHARACTERS",         "string"],
+        safe_words:            ["SAFE_WORDS_ENABLED",     "boolean"],
         debug_mode:            ["DEBUG_MODE",             "boolean"],
     };
 
@@ -219,6 +229,9 @@ function InnerKinks(hook) {
 
     const DOM_ARCHETYPES = ["dominant", "sadist", "owner", "rigger", "degrader", "switch"];
     const SUB_ARCHETYPES = ["submissive", "masochist", "pet", "rope bunny", "degradee", "brat", "switch"];
+    // Weighted CNC eligibility by archetype — chance that this role plays that way for this character
+    const CNC_RECEIVE_WEIGHTS = { "brat": 0.7, "degradee": 0.6, "masochist": 0.5, "rope bunny": 0.5, "switch": 0.3 };
+    const CNC_GIVE_WEIGHTS    = { "sadist": 0.6, "dominant": 0.5, "degrader": 0.5, "owner": 0.4, "switch": 0.3 };
 
     const VALID_ARCHETYPES = new Set([
         "dominant", "submissive", "switch", "brat", "masochist", "sadist",
@@ -478,7 +491,11 @@ function InnerKinks(hook) {
                 debugHeatWritten:  null,
                 lastTrigger:       "—",
                 lastLimit:         null,
-                profileGenerated:  false,
+                cncReceive:          undefined,
+                cncGive:             undefined,
+                safeWord:            null,
+                safeWordNegotiated:  false,
+                profileGenerated:    false,
             };
         }
         return IK.chars[name];
@@ -499,16 +516,27 @@ function InnerKinks(hook) {
     // CNC awareness
     //—————————————————————————————————————————————————————————————————————
 
+    // Roll once against a weight map, cache result. Returns null if no profile yet (don't cache).
+    function resolveCNCFlag(name, weightMap, cacheKey) {
+        const cs = getCharState(name);
+        if (cs[cacheKey] !== undefined) return cs[cacheKey];
+        const profile = readKinkProfile(getKinkCard(name));
+        if (!profile) return false; // no profile yet — don't cache, try again next turn
+        const weight = Math.max(0, ...profile.archetypes.map(a => weightMap[a.toLowerCase()] ?? 0));
+        const result = weight > 0 ? Math.random() < weight : false;
+        cs[cacheKey] = result;
+        return result;
+    }
+
+    // Their own refusal is part of the dynamic (Brat, Masochist, Degradee, Rope bunny)
+    function isCNCReceive(name) { return resolveCNCFlag(name, CNC_RECEIVE_WEIGHTS, "cncReceive"); }
+    // They may push past a partner's reluctance (Sadist, Dominant, Degrader, Owner)
+    function isCNCGive(name)    { return resolveCNCFlag(name, CNC_GIVE_WEIGHTS,    "cncGive");    }
+
+    // Manual override always wins; otherwise true if either flag resolves true
     function isCNC(name) {
-        if (S.CNC_CHARACTERS.split(",").some(n => n.trim().toLowerCase() === name.toLowerCase())) {
-            return true;
-        }
-        const card = getKinkCard(name);
-        if (card && typeof card.entry === "string") {
-            const e = card.entry.toLowerCase();
-            return e.includes("non-consent") || e.includes(" cnc") || e.includes("consensual non");
-        }
-        return false;
+        if (S.CNC_CHARACTERS.trim() && S.CNC_CHARACTERS.split(",").some(n => n.trim().toLowerCase() === name.toLowerCase())) return true;
+        return isCNCReceive(name) || isCNCGive(name);
     }
 
     //—————————————————————————————————————————————————————————————————————
@@ -646,8 +674,14 @@ function InnerKinks(hook) {
             ? ` Hard limits (kills the mood): ${parsed.limits.join(", ")}.`
             : "";
 
-        // If a limit fired last turn, override tier guidance for one turn
         const cs = getCharState(name);
+
+        // Safe word override — highest priority, suppresses all intimate content
+        if (IK.safeWordTimer > 0) {
+            return `[PRIORITY — SAFE WORD IN EFFECT. Do not write any intimate content involving ${name}. Write characters de-escalating, checking in, or stepping out of the dynamic.]${cardBlock}`;
+        }
+
+        // If a limit fired last turn, override tier guidance for one turn
         if (cs.lastLimit) {
             const firedLimit = cs.lastLimit;
             cs.lastLimit = null; // consume — one turn of override only
@@ -852,6 +886,7 @@ function InnerKinks(hook) {
             `drift_buffer: ${cs.driftBuffer.length > 0 ? cs.driftBuffer.join(", ") : "—"}`,
             `trigger: ${cs.lastTrigger ?? "—"}`,
             `limit: ${cs.lastLimit ?? "—"}`,
+            `safe_word: ${cs.safeWord ?? "—"}`,
         ];
         for (const [partner, rel] of Object.entries(cs.relationships)) {
             lines.push(
@@ -860,6 +895,7 @@ function InnerKinks(hook) {
                 `${partner} violations: ${rel.violationCount}`,
             );
         }
+        if (IK.safeWordTimer > 0) lines.push(`safe_word_timer: ${IK.safeWordTimer}`);
         card.description = lines.join("\n");
     }
 
@@ -889,7 +925,7 @@ function InnerKinks(hook) {
                 cs.driftBuffer = (val === "—" || val.trim() === "")
                     ? []
                     : val.split(",").map(t => t.trim()).filter(Boolean);
-            } else if (key === "trigger" || key === "limit") {
+            } else if (key === "trigger" || key === "limit" || key === "safe_word" || key === "safe_word_timer") {
                 // read-only display fields — never override
             } else {
                 // Relationship fields: "[partner] compat / ceiling / violations"
@@ -970,6 +1006,8 @@ function InnerKinks(hook) {
         // Create the config card here — addStoryCard is safe in context hook
         initConfigCard();
 
+        if (IK.safeWordTimer > 0) IK.safeWordTimer--;
+
         const characters = getCharacters();
         if (characters.length === 0) return;
 
@@ -1039,6 +1077,10 @@ function InnerKinks(hook) {
 
         // Heat emphasis and trigger injection — injected BEFORE the generation task so
         // the generation task lands last in context and the AI prioritizes it.
+        // Trigger/limit lines are collected across all characters and injected as ONE block
+        // so the AI only outputs one <|ik_trigger|> boundary covering everyone.
+        const triggerLimitLines = [];
+
         if (S.INTENSITY_ENABLED) {
             for (const name of characters) {
                 const cs      = getCharState(name);
@@ -1053,14 +1095,17 @@ function InnerKinks(hook) {
                 const playerRel = cs.relationships["player"] ?? null;
                 const compat    = playerRel ? playerRel.compat : null;
 
-                // Trigger + limit evaluation — boundary approach; skip during profile generation turns
+                // Collect trigger/limit lines for combined injection after the loop
                 if (profile && !IK.pending) {
-                    const conditions = profile.triggers.join(", ");
-                    const limits     = profile.limits ?? [];
-                    const limitPart  = limits.length > 0
-                        ? ` Then on the next line, LIMIT:${name}:YES:[which limit word or phrase] if the scene contained or implied any of (${limits.join(", ")}), or LIMIT:${name}:NO.`
-                        : "";
-                    text = text + `\n\n<SYSTEM>After writing the scene, output "<|ik_trigger|>" on its own line, then TRIGGER:${name}:YES if the player's action or scene involved any of (${conditions}), or TRIGGER:${name}:NO.${limitPart} No other text.</SYSTEM>`;
+                    triggerLimitLines.push(
+                        `TRIGGER:${name}:YES or TRIGGER:${name}:NO — did the scene involve any of: ${profile.triggers.join(", ")}`
+                    );
+                    const limits = profile.limits ?? [];
+                    if (limits.length > 0) {
+                        triggerLimitLines.push(
+                            `LIMIT:${name}:YES:[which limit] or LIMIT:${name}:NO — did the scene contain or imply any of: ${limits.join(", ")}`
+                        );
+                    }
                 }
 
                 // On generation turns suppress the card entry — buildProfileTask already
@@ -1073,7 +1118,25 @@ function InnerKinks(hook) {
                 if (S.COMPAT_ENABLED && cs.heat >= 2.0 && compat !== null && compat < 0.4) {
                     text = text + `\n[Note: ${name}'s comfort with the player is low (${compat.toFixed(1)}). Proceed carefully.]`;
                 }
+
+                // Safe word negotiation — fire once when heat first crosses into hot
+                if (S.SAFE_WORDS_ENABLED && !IK.pending && !IK.awaitingSafeWord
+                    && !cs.safeWordNegotiated && cs.heat >= 2.0) {
+                    cs.safeWordNegotiated = true;
+                    IK.awaitingSafeWord   = name;
+                    text = text + `\n\n<SYSTEM>Before continuing the scene, have ${name} establish a safe word with the player — naturally, in ${name}'s voice, without breaking immersion. Keep it brief. After the scene response, output SAFEWORD_SET:[the word or phrase the player gives]:[${name}] on its own line.</SYSTEM>`;
+                }
             }
+        }
+
+        // Inject one combined trigger/limit task covering all characters
+        if (triggerLimitLines.length > 0) {
+            if (S.SAFE_WORDS_ENABLED) {
+                triggerLimitLines.push(
+                    "SAFEWORD:YES if any character used their safe word as a genuine stop signal. SAFEWORD:NO otherwise."
+                );
+            }
+            text = text + `\n\n<SYSTEM>After writing the scene, output "<|ik_trigger|>" on its own line, then one line per entry below. No other text.\n${triggerLimitLines.join("\n")}</SYSTEM>`;
         }
 
         // Inject profile generation task last so it is the final instruction the AI reads.
@@ -1094,6 +1157,7 @@ function InnerKinks(hook) {
         const TRIGGER_BOUNDARY = "<|ik_trigger|>";
         const triggerFired     = {};
         const limitFired       = {}; // name.toLowerCase() → fired word (string) | false (NO)
+        let safeWordFired      = false;
         let storyText          = outputText;
 
         // Extract profile section — boundary first, then Archetype: fallback, then Triggers: fallback
@@ -1154,23 +1218,44 @@ function InnerKinks(hook) {
             }
         }
 
-        // Extract trigger + limit section — AI appended both after the boundary
+        // Extract trigger + limit section — one boundary block covering all characters
         const tIdx = storyText.indexOf(TRIGGER_BOUNDARY);
         if (tIdx !== -1) {
             const taskText = storyText.slice(tIdx + TRIGGER_BOUNDARY.length).trim();
             storyText      = storyText.slice(0, tIdx).trimEnd();
             text           = storyText;
-            const flagMatch = taskText.match(/TRIGGER:([^:\s]+):(YES|NO)/i);
-            if (flagMatch) {
-                triggerFired[flagMatch[1].trim().toLowerCase()] = flagMatch[2].toUpperCase() === "YES";
+            // Parse ALL trigger flags globally (one per character)
+            const tFlagRegex = /TRIGGER:([^:\s]+):(YES|NO)/gi;
+            let tMatch;
+            while ((tMatch = tFlagRegex.exec(taskText)) !== null) {
+                triggerFired[tMatch[1].trim().toLowerCase()] = tMatch[2].toUpperCase() === "YES";
             }
-            // LIMIT:Name:YES:[word] or LIMIT:Name:NO — colon-separated, word may contain spaces
-            const limitMatch = taskText.match(/LIMIT:([^:\s]+):(YES|NO)(?::(.+))?/i);
-            if (limitMatch) {
-                const lName = limitMatch[1].trim().toLowerCase();
-                limitFired[lName] = limitMatch[2].toUpperCase() === "YES"
-                    ? (limitMatch[3]?.trim() || true)
+            // Parse ALL limit flags globally — LIMIT:Name:YES:[word] or LIMIT:Name:NO
+            const lFlagRegex = /LIMIT:([^:\s]+):(YES|NO)(?::([^\n]*))?/gi;
+            let lMatch;
+            while ((lMatch = lFlagRegex.exec(taskText)) !== null) {
+                const lName = lMatch[1].trim().toLowerCase();
+                limitFired[lName] = lMatch[2].toUpperCase() === "YES"
+                    ? (lMatch[3]?.trim() || true)
                     : false;
+            }
+            // Capture negotiated safe word — SAFEWORD_SET:[word]:[CharName]
+            const swSetRegex = /SAFEWORD_SET:([^:\n]+):([^\n]+)/gi;
+            let swSetMatch;
+            while ((swSetMatch = swSetRegex.exec(taskText)) !== null) {
+                const word   = swSetMatch[1].trim().toLowerCase();
+                const swName = swSetMatch[2].trim();
+                const target = characters.find(n => n.toLowerCase() === swName.toLowerCase());
+                if (target && word) {
+                    getCharState(target).safeWord = word;
+                    IK.awaitingSafeWord = null;
+                    state.message = `Inner Kinks: Safe word established for ${target}.`;
+                }
+            }
+            // Detect safe word use — SAFEWORD:YES/NO
+            if (S.SAFE_WORDS_ENABLED) {
+                const swMatch = taskText.match(/SAFEWORD:(YES|NO)/i);
+                if (swMatch) safeWordFired = swMatch[1].toUpperCase() === "YES";
             }
         }
 
@@ -1201,6 +1286,19 @@ function InnerKinks(hook) {
                 storyText = storyText.replace(/\[?LIMIT:[^:\]\s]+:(YES|NO)(?::[^\]\n]*)?\]?/gi, "").trim();
                 text = storyText;
             }
+        }
+
+        // Substring fallback for safe word detection — personal word first, "safeword" as universal
+        if (S.SAFE_WORDS_ENABLED && !safeWordFired) {
+            const storyLowerSW = storyText.toLowerCase();
+            for (const name of outputChars) {
+                const personal = getCharState(name).safeWord;
+                if (personal) {
+                    const escaped = personal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    if (new RegExp(`\\b${escaped}\\b`, "i").test(storyText)) { safeWordFired = true; break; }
+                }
+            }
+            if (!safeWordFired && /\bsafeword\b/i.test(storyLowerSW)) safeWordFired = true;
         }
 
         // Record per-character trigger result for debug notes.
@@ -1277,7 +1375,7 @@ function InnerKinks(hook) {
                     upsertRelCard(name, "player", rel);
                 }
                 if (S.COMPAT_PENALTY_ENABLED && tags.includes("refusal")) {
-                    if (isCNC(name)) {
+                    if (isCNCReceive(name)) {
                         if (S.INTENSITY_ENABLED) applyHeatDelta(name, 0.25, mc);
                     } else {
                         applyViolation(name, "player");
@@ -1291,6 +1389,13 @@ function InnerKinks(hook) {
                     initRelationship(cs, other);
                 }
             }
+        }
+
+        // Safe word fired — reset all heat and set 2-turn scene override
+        if (safeWordFired) {
+            for (const name of outputChars) getCharState(name).heat = 0.0;
+            IK.safeWordTimer = 2;
+            state.message    = "Inner Kinks: Safe word used — scene paused for 2 turns.";
         }
 
         if (S.DEBUG_MODE) {
