@@ -701,6 +701,21 @@ function InnerKinks(hook) {
     }
 
     //—————————————————————————————————————————————————————————————————————
+    // Debug console card
+    //—————————————————————————————————————————————————————————————————————
+
+    function writeConsoleCard(lines) {
+        const CONSOLE_TITLE = "IK Console";
+        const entry    = (Array.isArray(lines) ? lines : [lines]).join("\n");
+        const existing = storyCards.find(c => (c.title || "") === CONSOLE_TITLE);
+        if (existing) {
+            existing.entry = entry;
+        } else {
+            addStoryCard("ik console debug", entry, "class", CONSOLE_TITLE, "");
+        }
+    }
+
+    //—————————————————————————————————————————————————————————————————————
     // Relationships & compat
     //—————————————————————————————————————————————————————————————————————
 
@@ -1202,12 +1217,26 @@ function InnerKinks(hook) {
                 } else {
                     text = storyText = `*[Inner Kinks: Couldn't parse ${namePending}'s profile — retrying. ${remaining} character${remaining !== 1 ? "s" : ""} remaining. Press **Continue** to continue.]*`;
                     state.message = `Inner Kinks: ${namePending}'s profile failed — pushed to retry.`;
+                    if (S.DEBUG_MODE) writeConsoleCard([
+                        `FAILED: ${namePending} — profile found but invalid`,
+                        `archetypes: ${profile?.archetypes?.join(", ") ?? "none"}`,
+                        `kinks: ${(profile?.archetypes ?? []).map(a => `${a}(${(profile.kinks?.[a] ?? []).length})`).join(", ") || "none"}`,
+                        `triggers: ${profile?.triggers?.length ?? 0}`,
+                        `dynamic: ${profile?.dynamic ?? "missing"}`,
+                        `--- raw output after boundary ---`,
+                        taskText.slice(0, 800),
+                    ]);
                 }
             } else {
                 IK.profileQueue.push(namePending); // retry at end of queue
                 const remaining = IK.profileQueue.length;
                 text = storyText = `*[Inner Kinks: ${namePending}'s profile wasn't found in output — retrying. ${remaining} character${remaining !== 1 ? "s" : ""} remaining. Press **Continue** to continue.]*`;
                 state.message = `Inner Kinks: ${namePending}'s profile output not found — pushed to retry.`;
+                if (S.DEBUG_MODE) writeConsoleCard([
+                    `FAILED: ${namePending} — no profile boundary or Archetype: line found`,
+                    `--- full AI output (first 800 chars) ---`,
+                    outputText.slice(0, 800),
+                ]);
             }
         }
 
