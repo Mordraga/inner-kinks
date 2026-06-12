@@ -333,6 +333,7 @@ function InnerKinks(hook) {
         let archetypes = null;
         const kinks    = {};
         let triggers   = null;
+        let limits     = null;
         let dynamic    = null;
         let libido     = null;
 
@@ -352,6 +353,8 @@ function InnerKinks(hook) {
             } else if (keyLo === "triggers") {
                 // Strip surrounding quotes the AI sometimes adds around individual triggers
                 triggers = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
+            } else if (keyLo === "limits") {
+                limits = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
             } else if (keyLo === "dynamic") {
                 dynamic = val.trim().split(/\s+/).slice(0, 4).join(" ");
             } else if (keyLo === "libido") {
@@ -367,6 +370,7 @@ function InnerKinks(hook) {
         // Clamp over-long fields down to required counts; reject if under-count (can't pad up)
         if (archetypes) archetypes = archetypes.slice(0, 2);
         if (triggers)   triggers   = triggers.slice(0, 5);
+        if (limits)     limits     = limits.slice(0, 5);
         if (archetypes) for (const a of archetypes) { if (kinks[a]) kinks[a] = kinks[a].slice(0, 2); }
 
         if (
@@ -377,7 +381,7 @@ function InnerKinks(hook) {
             || !dynamic
         ) return null;
 
-        return { archetypes, kinks, triggers, dynamic, libido };
+        return { archetypes, kinks, triggers, limits: limits ?? [], dynamic, libido };
     }
 
     function serializeKinkProfile(profile) {
@@ -385,8 +389,9 @@ function InnerKinks(hook) {
             `Archetype: ${profile.archetypes.join(", ")}`,
             ...profile.archetypes.map(a => `${a}: ${profile.kinks[a].join(", ")}`),
             `Triggers: ${profile.triggers.join(", ")}`,
-            `Dynamic: ${profile.dynamic}`,
         ];
+        if (profile.limits && profile.limits.length > 0) lines.push(`Limits: ${profile.limits.join(", ")}`);
+        lines.push(`Dynamic: ${profile.dynamic}`);
         if (profile.libido) lines.push(`Libido: ${profile.libido}`);
         return lines.join("\n");
     }
@@ -403,9 +408,10 @@ function InnerKinks(hook) {
             || (profile.libido != null && !LIBIDO_MASS[profile.libido])
         ) return false;
 
-        const words = profile.dynamic.trim().split(/\s+/);
-        const p     = words.length > 4 ? { ...profile, dynamic: words.slice(0, 4).join(" ") } : profile;
-        card.entry  = serializeKinkProfile(p);
+        const words  = profile.dynamic.trim().split(/\s+/);
+        const limits = Array.isArray(profile.limits) ? profile.limits.slice(0, 5) : [];
+        const p      = { ...profile, limits, dynamic: words.slice(0, 4).join(" ") };
+        card.entry   = serializeKinkProfile(p);
         return true;
     }
 
@@ -413,11 +419,12 @@ function InnerKinks(hook) {
     // partial may contain any subset of: archetypes, kinks, triggers, dynamic.
     // Returns true if the merged result passed validation and was written.
     function mergeKinkProfile(card, partial) {
-        const base   = readKinkProfile(card) ?? { archetypes: [], kinks: {}, triggers: [], dynamic: "", libido: null };
+        const base   = readKinkProfile(card) ?? { archetypes: [], kinks: {}, triggers: [], limits: [], dynamic: "", libido: null };
         const merged = {
             archetypes: partial.archetypes ?? base.archetypes,
             kinks:      { ...base.kinks, ...(partial.kinks ?? {}) },
             triggers:   partial.triggers  ?? base.triggers,
+            limits:     partial.limits    ?? base.limits,
             dynamic:    partial.dynamic   ?? base.dynamic,
             libido:     partial.libido    ?? base.libido,
         };
@@ -470,6 +477,7 @@ function InnerKinks(hook) {
                 relationships:    {},
                 debugHeatWritten:  null,
                 lastTrigger:       "—",
+                lastLimit:         null,
                 profileGenerated:  false,
             };
         }
@@ -629,25 +637,36 @@ function InnerKinks(hook) {
         const compatNote = (playerCompat !== null && heat >= 4.0)
             ? `\n[${name}'s comfort with player: ${playerCompat.toFixed(2)}]` : "";
 
-        // Build a compact kink desire line so the AI knows WHAT this character wants, not just that they're aroused
+        // Build kink desire and limit lines so the AI knows what this character wants AND what breaks the mood
         const parsed = cardEntry ? readKinkProfile({ entry: cardEntry }) : null;
         const desireLine = parsed
             ? ` Desires: ${parsed.archetypes.map(a => `${a} — ${(parsed.kinks[a] ?? []).join(", ")}`).join("; ")}.`
             : "";
+        const limitLine = (parsed && parsed.limits.length > 0)
+            ? ` Hard limits (kills the mood): ${parsed.limits.join(", ")}.`
+            : "";
+
+        // If a limit fired last turn, override tier guidance for one turn
+        const cs = getCharState(name);
+        if (cs.lastLimit) {
+            const firedLimit = cs.lastLimit;
+            cs.lastLimit = null; // consume — one turn of override only
+            return `[PRIORITY — ${name}: mood broken — "${firedLimit}" is a hard limit. Write ${name} pulling back, expressing discomfort, or shutting down the escalation. Do not continue the intimate direction.]${cardBlock}`;
+        }
 
         switch (tier) {
             case "cold":
                 return parsed
-                    ? `[${name}: heat 0.0/4.0 — not yet aroused.${desireLine} Profile is for personality reference only — no escalation yet.]${cardBlock}`
+                    ? `[${name}: heat 0.0/4.0 — not yet aroused.${desireLine}${limitLine} Profile is for personality reference only — no escalation yet.]${cardBlock}`
                     : `[${name}: heat 0.0/4.0 — not yet aroused. Keep scene intensity calibrated to this.]`;
             case "warm":
-                return `[${name}: heat ${heatStr}/4.0 — early engagement.${desireLine} Let these preferences subtly color ${name}'s reactions without forcing escalation.]${cardBlock}`;
+                return `[${name}: heat ${heatStr}/4.0 — early engagement.${desireLine}${limitLine} Let these preferences subtly color ${name}'s reactions without forcing escalation.]${cardBlock}`;
             case "hot":
-                return `[${name}: heat ${heatStr}/4.0 — aroused.${desireLine} Write ${name}'s behavior actively shaped by these desires.]${cardBlock}`;
+                return `[${name}: heat ${heatStr}/4.0 — aroused.${desireLine}${limitLine} Write ${name}'s behavior actively shaped by these desires.]${cardBlock}`;
             case "burning":
-                return `[PRIORITY — ${name}: heat ${heatStr}/4.0 — highly aroused.${desireLine} ${name} should be actively seeking or yielding to these desires.]${cardBlock}`;
+                return `[PRIORITY — ${name}: heat ${heatStr}/4.0 — highly aroused.${desireLine}${limitLine} ${name} should be actively seeking or yielding to these desires.]${cardBlock}`;
             case "peak":
-                return `[PRIORITY — ${name}: heat ${heatStr}/4.0 — peak arousal.${desireLine} Write full intensity — these are what ${name} craves right now.]${cardBlock}${compatNote}`;
+                return `[PRIORITY — ${name}: heat ${heatStr}/4.0 — peak arousal.${desireLine}${limitLine} Write full intensity — these are what ${name} craves right now.]${cardBlock}${compatNote}`;
             default:
                 return cardBlock.trim();
         }
@@ -706,6 +725,7 @@ function InnerKinks(hook) {
             `[archetype1]: [kink1], [kink2]`,
             `[archetype2]: [kink1], [kink2]`,
             `Triggers: [word or phrase], [word or phrase], [word or phrase], [word or phrase], [word or phrase]`,
+            `Limits: [word or phrase], [word or phrase], [word or phrase]`,
             `Dynamic: [relationship dynamic]`,
             `Libido: [libido level]`,
             "Rules:",
@@ -713,9 +733,10 @@ function InnerKinks(hook) {
             "- Exactly 2 archetypes from: Dominant, Submissive, Switch, Brat, Masochist, Sadist, Pet, Owner, Rigger, Rope bunny, Voyeur, Exhibitionist, Experimentalist, Degrader, Degradee",
             "- Exactly 2 kinks per archetype (sexual/intimate acts or dynamics, brief noun phrases, lowercase)",
             "- Exactly 5 triggers: concrete words or short phrases that would literally appear in dialogue or narration and cause an intimate reaction (e.g. 'good boy', 'kneel', 'beg', 'please', 'sir', 'pet') — NOT abstract concepts like 'power imbalances', 'authority figures', or 'submission cues'",
+            "- 3 to 5 limits: concrete words or short phrases that would kill the mood or cause a hard negative reaction — things this character dislikes or finds uncomfortable in intimate contexts (e.g. 'baby girl', 'little one', 'good boy' for someone who hates being praised like a child) — NOT abstract concepts",
             "- One relationship dynamic descriptor, four words maximum",
             "- One libido level: ace (very resistant to arousal), demi (needs emotional connection first), standard, or high (easily aroused)",
-            "- Infer intimate preferences from personality, behavior, and story context — not from job or hobbies",
+            "- Infer intimate preferences AND limits from personality, behavior, and story context — not from job or hobbies",
             "</SYSTEM>",
         ];
 
@@ -830,6 +851,7 @@ function InnerKinks(hook) {
             `decay_timer: ${cs.heatDecayTimer}`,
             `drift_buffer: ${cs.driftBuffer.length > 0 ? cs.driftBuffer.join(", ") : "—"}`,
             `trigger: ${cs.lastTrigger ?? "—"}`,
+            `limit: ${cs.lastLimit ?? "—"}`,
         ];
         for (const [partner, rel] of Object.entries(cs.relationships)) {
             lines.push(
@@ -867,8 +889,8 @@ function InnerKinks(hook) {
                 cs.driftBuffer = (val === "—" || val.trim() === "")
                     ? []
                     : val.split(",").map(t => t.trim()).filter(Boolean);
-            } else if (key === "trigger") {
-                // read-only display field — never override
+            } else if (key === "trigger" || key === "limit") {
+                // read-only display fields — never override
             } else {
                 // Relationship fields: "[partner] compat / ceiling / violations"
                 const parts  = key.split(" ");
@@ -920,6 +942,12 @@ function InnerKinks(hook) {
                 if (profile) {
                     const kinkWords = profile.archetypes.flatMap(a => profile.kinks[a] ?? []).map(k => k.toLowerCase());
                     if (kinkWords.some(k => inputLower.includes(k))) applyHeatDelta(name, 0.15, mc);
+                    // Limit word in player input: player is doing something this character dislikes
+                    const hitLimit = (profile.limits ?? []).find(l => inputLower.includes(l));
+                    if (hitLimit) {
+                        applyHeatDelta(name, -0.25, mc);
+                        getCharState(name).lastLimit = hitLimit;
+                    }
                 }
             }
 
@@ -1025,10 +1053,14 @@ function InnerKinks(hook) {
                 const playerRel = cs.relationships["player"] ?? null;
                 const compat    = playerRel ? playerRel.compat : null;
 
-                // Trigger evaluation — boundary approach; skip during profile generation turns
+                // Trigger + limit evaluation — boundary approach; skip during profile generation turns
                 if (profile && !IK.pending) {
                     const conditions = profile.triggers.join(", ");
-                    text = text + `\n\n<SYSTEM>After writing the scene, output "<|ik_trigger|>" on its own line, then TRIGGER:${name}:YES if the player's action or scene involved any of (${conditions}), or TRIGGER:${name}:NO. No other text.</SYSTEM>`;
+                    const limits     = profile.limits ?? [];
+                    const limitPart  = limits.length > 0
+                        ? ` Then on the next line, LIMIT:${name}:YES:[which limit word or phrase] if the scene contained or implied any of (${limits.join(", ")}), or LIMIT:${name}:NO.`
+                        : "";
+                    text = text + `\n\n<SYSTEM>After writing the scene, output "<|ik_trigger|>" on its own line, then TRIGGER:${name}:YES if the player's action or scene involved any of (${conditions}), or TRIGGER:${name}:NO.${limitPart} No other text.</SYSTEM>`;
                 }
 
                 // On generation turns suppress the card entry — buildProfileTask already
@@ -1061,6 +1093,7 @@ function InnerKinks(hook) {
         const PROFILE_BOUNDARY = "<|ik_profile|>";
         const TRIGGER_BOUNDARY = "<|ik_trigger|>";
         const triggerFired     = {};
+        const limitFired       = {}; // name.toLowerCase() → fired word (string) | false (NO)
         let storyText          = outputText;
 
         // Extract profile section — boundary first, then Archetype: fallback, then Triggers: fallback
@@ -1121,7 +1154,7 @@ function InnerKinks(hook) {
             }
         }
 
-        // Extract trigger section — AI appended it after the boundary
+        // Extract trigger + limit section — AI appended both after the boundary
         const tIdx = storyText.indexOf(TRIGGER_BOUNDARY);
         if (tIdx !== -1) {
             const taskText = storyText.slice(tIdx + TRIGGER_BOUNDARY.length).trim();
@@ -1130,6 +1163,14 @@ function InnerKinks(hook) {
             const flagMatch = taskText.match(/TRIGGER:([^:\s]+):(YES|NO)/i);
             if (flagMatch) {
                 triggerFired[flagMatch[1].trim().toLowerCase()] = flagMatch[2].toUpperCase() === "YES";
+            }
+            // LIMIT:Name:YES:[word] or LIMIT:Name:NO — colon-separated, word may contain spaces
+            const limitMatch = taskText.match(/LIMIT:([^:\s]+):(YES|NO)(?::(.+))?/i);
+            if (limitMatch) {
+                const lName = limitMatch[1].trim().toLowerCase();
+                limitFired[lName] = limitMatch[2].toUpperCase() === "YES"
+                    ? (limitMatch[3]?.trim() || true)
+                    : false;
             }
         }
 
@@ -1142,6 +1183,22 @@ function InnerKinks(hook) {
             }
             if (Object.keys(triggerFired).length > 0) {
                 storyText = storyText.replace(/\[?TRIGGER:[^:\]\s]+:(YES|NO)\]?/gi, "").replace(/^\s+/, "");
+                text = storyText;
+            }
+        }
+
+        // Fallback: inline limit flag regex
+        if (Object.keys(limitFired).length === 0) {
+            const limitFlagRegex = /\[?LIMIT:([^:\]\s]+):(YES|NO)(?::([^\]\n]*))?\]?/gi;
+            let limitFlagMatch;
+            while ((limitFlagMatch = limitFlagRegex.exec(storyText)) !== null) {
+                const lName = limitFlagMatch[1].trim().toLowerCase();
+                limitFired[lName] = limitFlagMatch[2].toUpperCase() === "YES"
+                    ? (limitFlagMatch[3]?.trim() || true)
+                    : false;
+            }
+            if (Object.keys(limitFired).length > 0) {
+                storyText = storyText.replace(/\[?LIMIT:[^:\]\s]+:(YES|NO)(?::[^\]\n]*)?\]?/gi, "").trim();
                 text = storyText;
             }
         }
@@ -1192,6 +1249,24 @@ function InnerKinks(hook) {
                 if (profile && detectIntimateScene(storyText)) {
                     const kinkWords = profile.archetypes.flatMap(a => profile.kinks[a] ?? []).map(k => k.toLowerCase());
                     if (kinkWords.some(k => storyLower.includes(k))) applyHeatDelta(name, 0.15, mc);
+                }
+                // Limit detection: AI judgment primary, substring fallback secondary
+                if (profile && (profile.limits ?? []).length > 0) {
+                    let hitLimit = null;
+                    if (nameLo in limitFired) {
+                        // AI explicitly judged it
+                        const result = limitFired[nameLo];
+                        hitLimit = result === false ? null
+                            : typeof result === "string" ? result
+                            : (profile.limits.find(l => storyLower.includes(l)) ?? "(limit)");
+                    } else {
+                        // Substring fallback — exact word/phrase match
+                        hitLimit = (profile.limits ?? []).find(l => storyLower.includes(l)) ?? null;
+                    }
+                    if (hitLimit) {
+                        applyHeatDelta(name, -0.5, mc);
+                        cs.lastLimit = hitLimit;
+                    }
                 }
             }
 
