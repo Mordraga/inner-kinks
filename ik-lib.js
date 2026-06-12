@@ -1288,19 +1288,6 @@ function InnerKinks(hook) {
             }
         }
 
-        // Substring fallback for safe word detection — personal word first, "safeword" as universal
-        if (S.SAFE_WORDS_ENABLED && !safeWordFired) {
-            const storyLowerSW = storyText.toLowerCase();
-            for (const name of outputChars) {
-                const personal = getCharState(name).safeWord;
-                if (personal) {
-                    const escaped = personal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                    if (new RegExp(`\\b${escaped}\\b`, "i").test(storyText)) { safeWordFired = true; break; }
-                }
-            }
-            if (!safeWordFired && /\bsafeword\b/i.test(storyLowerSW)) safeWordFired = true;
-        }
-
         // Record per-character trigger result for debug notes.
         if (S.DEBUG_MODE) {
             for (const name of characters) {
@@ -1323,6 +1310,18 @@ function InnerKinks(hook) {
             storyText.toLowerCase().includes(n.toLowerCase())
             || n.toLowerCase() in triggerFired
         );
+
+        // Substring fallback for safe word detection — personal word first, "safeword" as universal
+        if (S.SAFE_WORDS_ENABLED && !safeWordFired) {
+            for (const name of outputChars) {
+                const personal = getCharState(name).safeWord;
+                if (personal) {
+                    const escaped = personal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    if (new RegExp(`\\b${escaped}\\b`, "i").test(storyText)) { safeWordFired = true; break; }
+                }
+            }
+            if (!safeWordFired && /\bsafeword\b/i.test(storyText)) safeWordFired = true;
+        }
 
         for (const name of outputChars) {
             const cs       = getCharState(name);
