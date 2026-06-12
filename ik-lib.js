@@ -352,16 +352,18 @@ function InnerKinks(hook) {
             if (!val) continue;
             const keyLo = key.toLowerCase();
 
-            if (keyLo === "archetype") {
+            if (keyLo === "archetype" || keyLo === "archetypes") {
                 archetypes = val.split(",").map(a => {
                     const t = a.trim();
                     return ARCHETYPE_ALIASES[t.toLowerCase()] ?? t;
                 }).filter(Boolean);
             } else if (keyLo === "triggers") {
-                // Strip surrounding quotes the AI sometimes adds around individual triggers
-                triggers = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
+                // Strip surrounding quotes; concatenate if AI splits triggers across multiple lines
+                const t = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
+                triggers = triggers ? triggers.concat(t) : t;
             } else if (keyLo === "limits") {
-                limits = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
+                const l = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
+                limits = limits ? limits.concat(l) : l;
             } else if (keyLo === "dynamic") {
                 dynamic = val.trim().split(/\s+/).slice(0, 4).join(" ");
             } else if (keyLo === "libido") {
@@ -369,8 +371,16 @@ function InnerKinks(hook) {
             } else if (archetypes) {
                 // Normalize the line key through aliases before matching
                 const normalizedKeyLo = (ARCHETYPE_ALIASES[keyLo] ?? key).toLowerCase();
-                const match = archetypes.find(a => a.toLowerCase() === normalizedKeyLo);
-                if (match) kinks[match] = val.split(",").map(k => k.trim()).filter(Boolean);
+                const exactMatch = archetypes.find(a => a.toLowerCase() === normalizedKeyLo);
+                if (exactMatch) {
+                    kinks[exactMatch] = val.split(",").map(k => k.trim()).filter(Boolean);
+                } else if (keyLo === "kinks" || VALID_ARCHETYPES.has(normalizedKeyLo)) {
+                    // "Kinks:" line or a valid-archetype key that doesn't match the declared names
+                    // (e.g. AI writes "Dominant:" when the archetype is "Degrader") —
+                    // assign to the next archetype that hasn't received kinks yet
+                    const unmatched = archetypes.find(a => !kinks[a]);
+                    if (unmatched) kinks[unmatched] = val.split(",").map(k => k.trim()).filter(Boolean);
+                }
             }
         }
 
