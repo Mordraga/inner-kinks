@@ -17,9 +17,6 @@ function InnerKinks(hook) {
     CHARACTERS: ""
     // (comma-separated names: "Sarah, Leah, Lily")
     ,
-    // Turns between kink profile generation/update events:
-    COOLDOWN: 20
-    ,
     // Is Inner Kinks active?
     ENABLED: true
     ,
@@ -93,8 +90,7 @@ function InnerKinks(hook) {
     // Initialize persistent state
     state.InnerKinks ??= {};
     const IK = state.InnerKinks;
-    IK.cooldown         ??= 0;
-    IK.index            ??= 0;
+    IK.profileQueue     ??= null; // null = uninitialized; array of names still needing initial profiles
     IK.pending          ??= null;
     IK.driftTag         ??= null;
     IK.chars            ??= {};
@@ -107,7 +103,6 @@ function InnerKinks(hook) {
         "Inner Kinks v2.0 — by Mordraga",
         "enabled: true",
         "characters: ",
-        "cooldown: 20",
         "drift: true",
         "inertia: true",
         "intensity: true",
@@ -124,7 +119,6 @@ function InnerKinks(hook) {
     const CONFIG_KEY_MAP = {
         enabled:               ["ENABLED",                "boolean"],
         characters:            ["CHARACTERS",             "string"],
-        cooldown:              ["COOLDOWN",               "integer"],
         drift:                 ["DRIFT_ENABLED",          "boolean"],
         inertia:               ["INERTIA_ENABLED",        "boolean"],
         intensity:             ["INTENSITY_ENABLED",      "boolean"],
@@ -1057,24 +1051,13 @@ function InnerKinks(hook) {
             }
         }
 
-        // Cooldown rotation (if drift didn't claim pending)
-        if (!IK.pending) {
-            if (IK.cooldown > 0) {
-                IK.cooldown--;
-            } else {
-                IK.index    = IK.index % characters.length;
-                const name  = characters[IK.index];
-                IK.index    = (IK.index + 1) % characters.length;
-                // Only generate once per adventure — profileGenerated is false at adventure start
-                // even if a card from a previous session exists in the scenario.
-                if (!getCharState(name).profileGenerated) {
-                    IK.pending  = name;
-                    IK.driftTag = null;
-                    IK.cooldown = S.COOLDOWN;
-                } else {
-                    IK.cooldown = 0; // already profiled — skip to next character immediately
-                }
-            }
+        // Profile generation queue — initialize on first run, then pop one per turn
+        if (IK.profileQueue === null) {
+            IK.profileQueue = [...characters];
+        }
+        if (!IK.pending && IK.profileQueue.length > 0) {
+            IK.pending  = IK.profileQueue.shift();
+            IK.driftTag = null;
         }
 
         // Heat emphasis and trigger injection — injected BEFORE the generation task so
@@ -1192,9 +1175,8 @@ function InnerKinks(hook) {
                 const written = profile && upsertKinkCard(namePending, profile);
                 if (written) {
                     getCharState(namePending).profileGenerated = true;
-                    IK.cooldown = 2; // short pause before queuing next character
                 } else {
-                    IK.cooldown = 2; // retry in a few turns instead of waiting the full cooldown
+                    IK.profileQueue.push(namePending); // retry — goes to back of queue
                 }
                 if (S.RELATIONSHIP_ENABLED) {
                     for (const { name1, name2, dynamic } of relationships) {
@@ -1204,20 +1186,29 @@ function InnerKinks(hook) {
                         upsertRelCard(name1, name2, rel);
                     }
                 }
-                state.message = written
-                    ? `Inner Kinks: ${namePending}'s kink profile generated.`
-                    : profile
-                        ? `Inner Kinks: ${namePending}'s profile failed validation — retrying in 2 turns.`
-                        : `Inner Kinks: Could not parse a profile for ${namePending} — retrying in 2 turns.`;
                 if (S.DEBUG_MODE) {
                     const mc = S.INERTIA_ENABLED ? calcMassCurrent(namePending, []) : 1;
                     writeDebugInfo(namePending, mc);
                 }
-                // Replace generation output with a brief neutral placeholder
-                if (!storyText.trim()) storyText = text = `*[${namePending}'s profile is being updated...]*`;
+                // Always replace the generation turn output with a queue progress message
+                const remaining = IK.profileQueue.length;
+                if (written) {
+                    if (remaining > 0) {
+                        text = storyText = `*[Inner Kinks: ${namePending}'s profile captured — ${remaining} character${remaining !== 1 ? "s" : ""} remaining. Press **Continue** to generate the next.]*`;
+                        state.message = `Inner Kinks: ${namePending} done — ${remaining} left.`;
+                    } else {
+                        text = storyText = `*[Inner Kinks: All profiles captured. The story begins now.]*`;
+                        state.message = `Inner Kinks: All profiles captured.`;
+                    }
+                } else {
+                    text = storyText = `*[Inner Kinks: Couldn't parse ${namePending}'s profile — retrying. ${remaining} character${remaining !== 1 ? "s" : ""} remaining. Press **Continue** to continue.]*`;
+                    state.message = `Inner Kinks: ${namePending}'s profile failed — pushed to retry.`;
+                }
             } else {
-                IK.cooldown = 2;
-                state.message = `Inner Kinks: ${namePending}'s profile output not found — retrying in 2 turns.`;
+                IK.profileQueue.push(namePending); // retry at end of queue
+                const remaining = IK.profileQueue.length;
+                text = storyText = `*[Inner Kinks: ${namePending}'s profile wasn't found in output — retrying. ${remaining} character${remaining !== 1 ? "s" : ""} remaining. Press **Continue** to continue.]*`;
+                state.message = `Inner Kinks: ${namePending}'s profile output not found — pushed to retry.`;
             }
         }
 
