@@ -748,7 +748,8 @@ function InnerKinks(hook) {
 
         const lines = [
             "<SYSTEM>",
-            `After writing your story response for this turn, output "<|ik_profile|>" on its own line, then ${name}'s kink profile in this exact format — no text after the profile:`,
+            `DO NOT write story content this turn. Output ONLY ${name}'s kink profile in the exact format below. Start your response with "<|ik_profile|>" on its own line:`,
+            `<|ik_profile|>`,
             `Archetype: [archetype1], [archetype2]`,
             `[archetype1]: [kink1], [kink2]`,
             `[archetype2]: [kink1], [kink2]`,
@@ -1114,19 +1115,17 @@ function InnerKinks(hook) {
             }
         }
 
-        // Inject one combined trigger/limit task covering all characters
-        if (triggerLimitLines.length > 0) {
+        // On profile generation turns, skip trigger/limit — don't split the AI's attention.
+        // On normal turns, inject trigger/limit task then (no pending) nothing after it.
+        if (IK.pending) {
+            text = text + "\n\n" + buildProfileTask(IK.pending, IK.driftTag);
+        } else if (triggerLimitLines.length > 0) {
             if (S.SAFE_WORDS_ENABLED) {
                 triggerLimitLines.push(
                     "SAFEWORD:YES if any character used their safe word as a genuine stop signal. SAFEWORD:NO otherwise."
                 );
             }
             text = text + `\n\n<SYSTEM>After writing the scene, output "<|ik_trigger|>" on its own line, then one line per entry below. No other text.\n${triggerLimitLines.join("\n")}</SYSTEM>`;
-        }
-
-        // Inject profile generation task last so it is the final instruction the AI reads.
-        if (IK.pending) {
-            text = text + "\n\n" + buildProfileTask(IK.pending, IK.driftTag);
         }
 
         return;
