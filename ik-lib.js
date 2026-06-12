@@ -1070,8 +1070,10 @@ function InnerKinks(hook) {
                 if (!getCharState(name).profileGenerated) {
                     IK.pending  = name;
                     IK.driftTag = null;
+                    IK.cooldown = S.COOLDOWN;
+                } else {
+                    IK.cooldown = 0; // already profiled — skip to next character immediately
                 }
-                IK.cooldown = S.COOLDOWN;
             }
         }
 
@@ -1190,6 +1192,7 @@ function InnerKinks(hook) {
                 const written = profile && upsertKinkCard(namePending, profile);
                 if (written) {
                     getCharState(namePending).profileGenerated = true;
+                    IK.cooldown = 2; // short pause before queuing next character
                 } else {
                     IK.cooldown = 2; // retry in a few turns instead of waiting the full cooldown
                 }
