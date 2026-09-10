@@ -310,6 +310,16 @@ function InnerKinks(hook) {
         ) ?? null;
     }
 
+    function getCharCard(name) {
+        const target = name.toLowerCase();
+        return storyCards.find(card =>
+            typeof card.title === "string"
+            && card.title.toLowerCase() === target
+            && typeof card.entry === "string"
+            && card.entry.trim() !== ""
+        ) ?? null;
+    }
+
     function getKinkCard(name) {
         const target = (name + " Kinks").toLowerCase();
         return storyCards.find(card =>
@@ -362,7 +372,7 @@ function InnerKinks(hook) {
                 const t = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
                 triggers = triggers ? triggers.concat(t) : t;
             } else if (keyLo === "limits") {
-                const l = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean);
+                const l = val.split(",").map(t => t.trim().replace(/^["']+|["']+$/g, "").toLowerCase()).filter(Boolean).filter(l => l !== "safeword");
                 limits = limits ? limits.concat(l) : l;
             } else if (keyLo === "dynamic") {
                 dynamic = val.trim().split(/\s+/).slice(0, 4).join(" ");
@@ -395,10 +405,9 @@ function InnerKinks(hook) {
             || archetypes.some(a => !VALID_ARCHETYPES.has(a.toLowerCase()))
             || archetypes.some(a => (kinks[a] ?? []).length !== 2)
             || !triggers || triggers.length !== 5
-            || !dynamic
         ) return null;
 
-        return { archetypes, kinks, triggers, limits: limits ?? [], dynamic, libido };
+        return { archetypes, kinks, triggers, limits: limits ?? [], dynamic: dynamic || "unspecified", libido };
     }
 
     function serializeKinkProfile(profile) {
@@ -773,7 +782,7 @@ function InnerKinks(hook) {
 
         const lines = [
             "<SYSTEM>",
-            `DO NOT write story content this turn. Output ONLY ${name}'s kink profile in the exact format below. Start your response with "<|ik_profile|>" on its own line:`,
+            `This turn: fill in ${name}'s BDSM profile using their personality as context. Output the profile only — start with "<|ik_profile|>" on its own line:`,
             `<|ik_profile|>`,
             `Archetype: [archetype1], [archetype2]`,
             `[archetype1]: [kink1], [kink2]`,
@@ -782,15 +791,13 @@ function InnerKinks(hook) {
             `Limits: [word or phrase], [word or phrase], [word or phrase]`,
             `Dynamic: [relationship dynamic]`,
             `Libido: [libido level]`,
-            "Rules:",
-            "- Archetypes and kinks describe sexual and intimate preferences ONLY — not occupations, hobbies, or personality traits",
-            "- Exactly 2 archetypes from: Dominant, Submissive, Switch, Brat, Masochist, Sadist, Pet, Owner, Rigger, Rope bunny, Voyeur, Exhibitionist, Experimentalist, Degrader, Degradee",
-            "- Exactly 2 kinks per archetype (sexual/intimate acts or dynamics, brief noun phrases, lowercase)",
-            "- Exactly 5 triggers: concrete words or short phrases that would literally appear in dialogue or narration and cause an intimate reaction (e.g. 'good boy', 'kneel', 'beg', 'please', 'sir', 'pet') — NOT abstract concepts like 'power imbalances', 'authority figures', or 'submission cues'",
-            "- 3 to 5 limits: concrete words or short phrases that would kill the mood or cause a hard negative reaction — things this character dislikes or finds uncomfortable in intimate contexts (e.g. 'baby girl', 'little one', 'good boy' for someone who hates being praised like a child) — NOT abstract concepts",
-            "- One relationship dynamic descriptor, four words maximum",
-            "- One libido level: ace (very resistant to arousal), demi (needs emotional connection first), standard, or high (easily aroused)",
-            "- Infer intimate preferences AND limits from personality, behavior, and story context — not from job or hobbies",
+            "Constraints:",
+            "- Archetypes: pick exactly 2 from: Dominant, Submissive, Switch, Brat, Masochist, Sadist, Pet, Owner, Rigger, Rope bunny, Voyeur, Exhibitionist, Experimentalist, Degrader, Degradee",
+            "- Kinks: write 2 things per archetype that this character actually does in an intimate scene",
+            "- Triggers: exactly 5 individual words or two-word phrases — not sentences, not dialogue. Words that could appear anywhere in a scene and cause an intimate reaction (e.g. 'good girl', 'pet', 'watch', 'kneel')",
+            "- Limits: 3–5 individual words or two-word phrases — same format as triggers (e.g. 'baby girl', 'beg', 'fragile') — things that would kill the mood",
+            "- Dynamic: sum up how this character behaves intimately in 4 words or less",
+            "- Libido: ace / demi / standard / high",
             "</SYSTEM>",
         ];
 
@@ -805,6 +812,9 @@ function InnerKinks(hook) {
         if (acCard && typeof acCard.entry === "string") {
             const clean = acCard.entry.replace(/^\{title:[^}]*\}\s*/i, "").trim();
             if (clean !== "") lines.splice(-1, 0, `${name}'s background:\n${clean}`);
+        } else {
+            const charCard = getCharCard(name);
+            if (charCard) lines.splice(-1, 0, `${name}'s background:\n${charCard.entry.trim()}`);
         }
 
         if (kinkCard && typeof kinkCard.entry === "string" && kinkCard.entry.trim() !== "") {
@@ -816,6 +826,14 @@ function InnerKinks(hook) {
                 `Also append one relationship line per partner after the profile (format: [${name}] ↔ [Partner]: [four word dynamic]):`,
                 `Known partners: ${partners.join(", ")}`,
             ]);
+        }
+
+        const existingProfiles = getCharacters()
+            .filter(n => n !== name)
+            .map(n => { const c = getKinkCard(n); return (c && c.entry.trim()) ? `${n}: ${c.entry.trim()}` : null; })
+            .filter(Boolean);
+        if (existingProfiles.length > 0) {
+            lines.splice(-1, 0, `Other characters already have profiles — do not copy them. ${name}'s profile must come from ${name}'s own personality:\n${existingProfiles.join("\n\n")}`);
         }
 
         return lines.join("\n");
@@ -1316,6 +1334,17 @@ function InnerKinks(hook) {
             }
             if (Object.keys(limitFired).length > 0) {
                 storyText = storyText.replace(/\[?LIMIT:[^:\]\s]+:(YES|NO)(?::[^\]\n]*)?\]?/gi, "").trim();
+                text = storyText;
+            }
+        }
+
+        // Fallback: inline SAFEWORD: flag — strip it from story text so it's never shown,
+        // and detect YES even if the AI didn't use the trigger boundary.
+        if (S.SAFE_WORDS_ENABLED) {
+            const swInline = storyText.match(/SAFEWORD:(YES|NO)/i);
+            if (swInline) {
+                if (!safeWordFired && swInline[1].toUpperCase() === "YES") safeWordFired = true;
+                storyText = storyText.replace(/\n*SAFEWORD:(YES|NO)\n*/gi, "\n").trim();
                 text = storyText;
             }
         }
